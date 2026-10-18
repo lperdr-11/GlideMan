@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>My Music</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#666;--card:#f2f2f4;--acc:#6c47ff;--line:#e2e2e6}
+@media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#f2f2f2;--mut:#9a9aa2;--card:#1d1d21;--acc:#9d85ff;--line:#2a2a30}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
+header{display:flex;align-items:center;gap:8px;padding:12px 16px}
+header h1{flex:1;margin:0;font-size:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{flex:1;overflow-y:auto;padding:0 8px 12px}
+.btn,button{font:inherit;color:inherit;background:var(--card);border:0;border-radius:10px;padding:8px 14px;cursor:pointer}
+.btn{background:var(--acc);color:#fff}
+#search{width:calc(100% - 8px);margin:0 4px 8px;padding:10px 12px;font:inherit;color:inherit;background:var(--card);border:0;border-radius:10px}
+.row{display:flex;align-items:center;gap:8px;padding:10px 8px;border-bottom:1px solid var(--line);cursor:pointer}
+.row .meta{flex:1;min-width:0;display:flex;flex-direction:column}
+.row b,.row small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+small{color:var(--mut)}
+.dots{background:none;font-size:20px;padding:6px 12px}
+.empty{color:var(--mut);padding:16px;text-align:center}
+#player{background:var(--card);padding:8px 14px;border-top:1px solid var(--line)}
+#player b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#seek{width:100%;accent-color:var(--acc);margin:6px 0 0}
+.ctl{display:flex;align-items:center;justify-content:space-between}
+.ctl button{background:none;font-size:22px;padding:6px 10px;opacity:.55}
+.ctl button.on,.ctl #pp,.ctl .pn{opacity:1}
+.ctl button.on{color:var(--acc)}
+#pp{font-size:28px}
+nav{display:flex;border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;border-radius:0;background:none;padding:14px;color:var(--mut)}
+nav button.on{color:var(--acc);font-weight:600}
+#sheet{position:fixed;inset:0;background:#0008;display:flex;align-items:flex-end;z-index:9}
+#sheet[hidden]{display:none}
+#sbox{width:100%;background:var(--bg);border-radius:18px 18px 0 0;padding:16px 16px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:8px;max-height:70vh;overflow-y:auto}
+#sbox h3{margin:0 0 4px;font-size:16px}
+#sbox button{text-align:left;padding:14px}
+.danger{color:#e5484d}
+#toast{position:fixed;left:50%;top:60px;transform:translateX(-50%);background:#000c;color:#fff;padding:8px 16px;border-radius:20px;font-size:14px;z-index:10}
+#toast[hidden]{display:none}
+.pic{width:44px;height:44px;border-radius:10px;background:var(--card);display:flex;align-items:center;justify-content:center;font-size:24px;object-fit:cover;flex:none}
+#sbox input{font:inherit;color:inherit;background:var(--card);border:0;border-radius:10px;padding:12px}
+.emos{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+.emos button{font-size:22px;text-align:center;padding:8px}
+.emos button.sel{outline:2px solid var(--acc)}
+.frow{display:flex;gap:8px}.frow button{flex:1;text-align:center}
+</style></head>
+<body>
+<header><h1 id="ttl">Library</h1><div id="hact" style="display:flex;gap:8px"></div></header>
+<main id="main"></main>
+<div id="player" hidden>
+  <b id="pt"></b>
+  <input type="range" id="seek" min="0" max="0" step="1" value="0">
+  <div class="ctl">
+    <small id="tm">0:00 / 0:00</small>
+    <button id="shuf" data-a="shuf">🔀</button>
+    <button class="pn" data-a="prev">⏮</button>
+    <button id="pp" data-a="toggle">▶</button>
+    <button class="pn" data-a="next">⏭</button>
+    <button id="rep" data-a="rep">🔁</button>
+  </div>
+</div>
+<nav><button data-a="tab" data-v="lib">♪ Library</button><button data-a="tab" data-v="pls">☰ Playlists</button></nav>
+<div id="sheet" hidden><div id="sbox"></div></div>
+<div id="toast" hidden></div>
+<audio id="au" preload="auto"></audio>
+<input type="file" id="pimg" accept="image/*" hidden>
+<input type="file" id="file" accept="audio/*,.mp3,.m4a,.flac,.wav,.ogg" multiple hidden>
+<script>
+const $=s=>document.querySelector(s),au=$('#au');
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt=s=>{s=Math.floor(s||0);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+let tracks=[],pls=[],view='lib',q='',curList=[],queue=[],qi=-1,shuffle=false,rep=0,curUrl=null,seeking=false;
+const byId=id=>tracks.find(t=>t.id===id);
+
+// ---------- storage (IndexedDB) ----------
+const DB=new Promise((res,rej)=>{const r=indexedDB.open('mymusic',1);
+  r.onupgradeneeded=()=>{const d=r.result;d.createObjectStore('tracks',{keyPath:'id'});d.createObjectStore('blobs');d.createObjectStore('playlists',{keyPath:'id'})};
+  r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+const run=(stores,mode,fn)=>DB.then(db=>new Promise((res,rej)=>{const t=db.transaction(stores,mode);const r=fn(t);
+  t.oncomplete=()=>res(r&&r.result);t.onerror=t.onabort=()=>rej(t.error)}));
+const savePl=p=>run('playlists','readwrite',t=>t.objectStore('playlists').put(p));
+async function load(){
+  tracks=(await run('tracks','readonly',t=>t.objectStore('tracks').getAll()))||[];
+  tracks.sort((a,b)=>a.title.localeCompare(b.title));
+  pls=(await run('playlists','readonly',t=>t.objectStore('playlists').getAll()))||[];
+  pls.sort((a,b)=>a.name.localeCompare(b.name));
+}
+function toast(m,ms=2500){const t=$('#toast');t.textContent=m;t.hidden=false;clearTimeout(toast.t);if(ms)toast.t=setTimeout(()=>t.hidden=true,ms)}
+
+// ---------- import ----------
+function getDur(f){return new Promise(r=>{const a=new Audio(),u=URL.createObjectURL(f);
+  const done=v=>{URL.revokeObjectURL(u);r(v)};a.preload='metadata';
+  a.onloadedmetadata=()=>done(isFinite(a.duration)?a.duration:0);a.onerror=()=>done(0);a.src=u})}
+$('#file').onchange=async e=>{
+  const fs=[...e.target.files];e.target.value='';
+  try{await navigator.storage?.persist?.()}catch{}
+  let n=0;
+  for(const f of fs){
+    toast(`Importing ${++n}/${fs.length}…`,0);
+    if(tracks.some(t=>t.name===f.name&&t.size===f.size))continue;
+    let title=f.name.replace(/\.[^.]+$/,''),artist='Unknown artist';
+    const m=title.match(/^(.+?)\s+-\s+(.+)$/);if(m){artist=m[1];title=m[2]}
+    const dur=await getDur(f),id=uid();
+    try{await run(['tracks','blobs'],'readwrite',t=>{t.objectStore('tracks').put({id,name:f.name,size:f.size,title,artist,dur});return t.objectStore('blobs').put(f,id)});
+      tracks.push({id,name:f.name,size:f.size,title,artist,dur})}
+    catch{toast('Storage full or blocked');return}
+  }
+  await load();render();toast(`Imported ${fs.length} file(s)`);
+};
+
+// ---------- playback ----------
+async function playIndex(i){
+  qi=i;const id=queue[i];
+  const b=await run('blobs','readonly',t=>t.objectStore('blobs').get(id));
+  if(!b){toast('File missing');return}
+  if(curUrl)URL.revokeObjectURL(curUrl);
+  curUrl=URL.createObjectURL(b);au.src=curUrl;au.loop=rep===2;
+  try{await au.play()}catch{}
+  setMeta();updPlayer();
+}
+function playList(ids,i){if(!ids.length)return;queue=ids.slice();playIndex(i)}
+function next(auto){
+  if(!queue.length)return;let i;
+  if(shuffle&&queue.length>1){do{i=Math.floor(Math.random()*queue.length)}while(i===qi)}
+  else{i=qi+1;if(i>=queue.length){if(rep===1||!auto)i=0;else{au.pause();return}}}
+  playIndex(i);
+}
+function prev(){if(au.currentTime>3||qi<=0){au.currentTime=0}else playIndex(qi-1)}
+au.onended=()=>next(true);
+au.onplay=au.onpause=()=>{$('#pp').textContent=au.paused?'▶':'⏸'};
+au.onloadedmetadata=()=>{$('#seek').max=Math.floor(au.duration)||0};
+au.ontimeupdate=()=>{
+  if(!seeking)$('#seek').value=Math.floor(au.currentTime);
+  $('#tm').textContent=fmt(au.currentTime)+' / '+fmt(au.duration);
+  if('mediaSession' in navigator&&isFinite(au.duration)){try{navigator.mediaSession.setPositionState({duration:au.duration,position:Math.min(au.currentTime,au.duration),playbackRate:1})}catch{}}
+};
+const sk=$('#seek');
+sk.oninput=()=>{au.currentTime=+sk.value};
+['pointerdown','touchstart'].forEach(e=>sk.addEventListener(e,()=>seeking=true));
+['pointerup','pointercancel','touchend'].forEach(e=>sk.addEventListener(e,()=>seeking=false));
+function updPlayer(){
+  const t=byId(queue[qi]);$('#player').hidden=!t;if(!t)return;
+  $('#pt').textContent=t.title+' — '+t.artist;
+  $('#shuf').classList.toggle('on',shuffle);
+  $('#rep').classList.toggle('on',rep>0);$('#rep').textContent=rep===2?'🔂':'🔁';
+}
+// Lock-screen / notification controls (this is what enables background control)
+function setMeta(){
+  const t=byId(queue[qi]);if(!t||!('mediaSession' in navigator))return;
+  navigator.mediaSession.metadata=new MediaMetadata({title:t.title,artist:t.artist,album:'My Music',artwork:[{src:'icon-512.png',sizes:'512x512',type:'image/png'}]});
+}
+if('mediaSession' in navigator){
+  const h=(a,f)=>{try{navigator.mediaSession.setActionHandler(a,f)}catch{}};
+  h('play',()=>au.play());h('pause',()=>au.pause());h('previoustrack',prev);h('nexttrack',()=>next());
+  h('seekto',d=>{au.currentTime=d.seekTime});
+}
+
+// ---------- UI ----------
+const rowHtml=t=>`<div class="row" data-a="play" data-id="${t.id}"><div class="meta"><b>${esc(t.title)}</b><small>${esc(t.artist)} · ${fmt(t.dur)}</small></div><button class="dots" data-a="menu" data-id="${t.id}">⋮</button></div>`;
+function renderList(){
+  const list=tracks.filter(t=>(t.title+' '+t.artist).toLowerCase().includes(q));
+  curList=list.map(t=>t.id);
+  $('#list').innerHTML=list.length?list.map(rowHtml).join(''):`<p class="empty">${tracks.length?'No matches.':'Tap Import to add your music.'}</p>`;
+}
+function render(){
+  const main=$('#main'),h=$('#hact'),tt=$('#ttl');
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===(view.startsWith('pl:')?'pls':view)));
+  if(view==='lib'){
+    tt.textContent='Library';h.innerHTML='<label class="btn" for="file">Import</label>';
+    main.innerHTML=`<input id="search" placeholder="Search ${tracks.length} songs" value="${esc(q)}"><div id="list"></div>`;
+    $('#search').oninput=e=>{q=e.target.value.toLowerCase();renderList()};
+    renderList();
+  }else if(view==='pls'){
+    tt.textContent='Playlists';h.innerHTML='<button class="btn" data-a="newpl">+ New</button>';
+    main.innerHTML=pls.length?pls.map(p=>`<div class="row" data-a="openpl" data-id="${p.id}">${iconHtml(p)}<div class="meta"><b>${esc(p.name)}</b><small>${p.ids.length} songs</small></div><button class="dots" data-a="editpl" data-id="${p.id}">✏️</button></div>`).join(''):'<p class="empty">No playlists yet. Tap “+ New”.</p>';
+  }else{
+    const p=pls.find(x=>x.id===view.slice(3));if(!p){view='pls';return render()}
+    const ids=p.ids.filter(byId);curList=ids;
+    tt.textContent=(p.img?'':(p.icon||'🎵')+' ')+p.name;
+    h.innerHTML='<button data-a="tab" data-v="pls">Back</button><button data-a="editpl" data-id="'+p.id+'">✏️</button><button class="btn" data-a="playall">▶</button>';
+    main.innerHTML=ids.length?ids.map(i=>rowHtml(byId(i))).join(''):'<p class="empty">Empty. Add songs from the Library (⋮ menu).</p>';
+  }
+}
+const sheet=html=>{$('#sbox').innerHTML=html;$('#sheet').hidden=false};
+const closeSheet=()=>$('#sheet').hidden=true;
+$('#sheet').onclick=e=>{if(e.target.id==='sheet')closeSheet()};
+
+async function act(a,d){
+  const pid=view.startsWith('pl:')?view.slice(3):null,curPl=pid&&pls.find(p=>p.id===pid);
+  switch(a){
+    case 'tab':view=d.v;render();break;
+    case 'play':playList(curList,curList.indexOf(d.id));break;
+    case 'playall':playList(curList,0);break;
+    case 'toggle':au.paused?au.play():au.pause();break;
+    case 'next':next();break;
+    case 'prev':prev();break;
+    case 'shuf':shuffle=!shuffle;updPlayer();break;
+    case 'rep':rep=(rep+1)%3;au.loop=rep===2;updPlayer();break;
+    case 'newpl':form={id:null,name:'',icon:'🎵',img:null,addId:null};formSheet();break;
+    case 'editpl':{const p=pls.find(x=>x.id===d.id);form={id:p.id,name:p.name,icon:p.icon||'🎵',img:p.img||null,addId:null};formSheet();break}
+    case 'emo':keepName();form.icon=d.e;form.img=null;formSheet();break;
+    case 'pickimg':keepName();$('#pimg').click();break;
+    case 'clearimg':keepName();form.img=null;formSheet();break;
+    case 'saveform':{keepName();const n=form.name.trim();if(!n){toast('Enter a name');break}
+      const typed=($('#femo')||{}).value;if(typed&&typed.trim()){form.icon=firstChar(typed.trim());form.img=null}
+      let p=form.id&&pls.find(x=>x.id===form.id);
+      if(p){p.name=n;p.icon=form.icon;p.img=form.img}
+      else p={id:uid(),name:n,icon:form.icon,img:form.img,ids:form.addId?[form.addId]:[]};
+      await savePl(p);await load();closeSheet();render();break}
+    case 'openpl':view='pl:'+d.id;render();break;
+    case 'delpl':if(confirm('Delete this playlist?')){await run('playlists','readwrite',t=>t.objectStore('playlists').delete(d.id));await load();closeSheet();if(view==='pl:'+d.id)view='pls';render()}break;
+    case 'menu':{const t=byId(d.id);
+      sheet(`<h3>${esc(t.title)}</h3><button data-a="addto" data-id="${t.id}">Add to playlist</button>`+
+        (curPl?`<button data-a="mv" data-id="${t.id}" data-d="-1">Move up</button><button data-a="mv" data-id="${t.id}" data-d="1">Move down</button><button data-a="rmpl" data-id="${t.id}">Remove from playlist</button>`:'')+
+        `<button class="danger" data-a="deltrack" data-id="${t.id}">Delete from app</button>`);break}
+    case 'addto':sheet('<h3>Add to playlist</h3>'+pls.map(p=>`<button data-a="addpl" data-id="${d.id}" data-p="${p.id}">${esc(p.name)}</button>`).join('')+`<button data-a="newadd" data-id="${d.id}">+ New playlist</button>`);break;
+    case 'addpl':{const p=pls.find(x=>x.id===d.p);if(!p.ids.includes(d.id)){p.ids.push(d.id);await savePl(p)}closeSheet();toast('Added to '+p.name);break}
+    case 'newadd':form={id:null,name:'',icon:'🎵',img:null,addId:d.id};formSheet();break;
+    case 'rmpl':curPl.ids=curPl.ids.filter(i=>i!==d.id);await savePl(curPl);closeSheet();render();break;
+    case 'mv':{const i=curPl.ids.indexOf(d.id),j=i+ +d.d;if(j>=0&&j<curPl.ids.length){[curPl.ids[i],curPl.ids[j]]=[curPl.ids[j],curPl.ids[i]];await savePl(curPl)}closeSheet();render();break}
+    case 'deltrack':{
+      if(!confirm('Delete this song from the app?'))break;
+      await run(['tracks','blobs'],'readwrite',t=>{t.objectStore('tracks').delete(d.id);return t.objectStore('blobs').delete(d.id)});
+      for(const p of pls)if(p.ids.includes(d.id)){p.ids=p.ids.filter(i=>i!==d.id);await savePl(p)}
+      await load();closeSheet();render();break}
+  }
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(b){e.stopPropagation();act(b.dataset.a,b.dataset)}});
+
+// ---------- playlist form (name + emoji or image icon) ----------
+let form=null;
+const EMOJI=['🎵','🎧','🎸','🎹','🥁','🎷','🎺','🎻','🎤','🔥','❤️','⭐','🌙','☀️','🌊','🚗','🏋️','🧘','📚','🎉','😴','🌧️','🏖️','👑'];
+const iconHtml=p=>p.img?`<img class="pic" src="${p.img}" alt="">`:`<span class="pic">${esc(p.icon||'🎵')}</span>`;
+const firstChar=v=>window.Intl&&Intl.Segmenter?[...new Intl.Segmenter().segment(v)][0].segment:Array.from(v)[0];
+function keepName(){const n=$('#fname');if(n)form.name=n.value}
+function formSheet(){
+  sheet(`<h3>${form.id?'Edit playlist':'New playlist'}</h3>
+  <div style="display:flex;gap:10px;align-items:center">${iconHtml(form)}<input id="fname" style="flex:1;min-width:0" placeholder="Playlist name" maxlength="40" value="${esc(form.name)}"></div>
+  <div class="emos">${EMOJI.map(e=>`<button data-a="emo" data-e="${e}" class="${!form.img&&form.icon===e?'sel':''}">${e}</button>`).join('')}</div>
+  <input id="femo" placeholder="Or type any emoji" maxlength="8">
+  <div class="frow"><button data-a="pickimg">Upload image</button>${form.img?'<button data-a="clearimg">Remove image</button>':''}</div>
+  <div class="frow"><button class="btn" data-a="saveform">Save</button>${form.id?`<button class="danger" data-a="delpl" data-id="${form.id}">Delete</button>`:''}</div>`);
+}
+$('#pimg').onchange=async e=>{
+  const f=e.target.files[0];e.target.value='';if(!f||!form)return;
+  try{
+    const bmp=await createImageBitmap(f),c=document.createElement('canvas');c.width=c.height=128;
+    const m=Math.min(bmp.width,bmp.height);
+    c.getContext('2d').drawImage(bmp,(bmp.width-m)/2,(bmp.height-m)/2,m,m,0,0,128,128);
+    form.img=c.toDataURL('image/jpeg',.85);formSheet();
+  }catch{toast('Could not read that image')}
+};
+
+load().then(render);
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+</script>
+</body></html>
