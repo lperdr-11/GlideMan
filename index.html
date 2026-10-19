@@ -70,6 +70,7 @@ nav button.on{color:var(--acc);font-weight:600}
 <div id="toast" hidden></div>
 <audio id="au" preload="auto"></audio>
 <input type="file" id="pimg" accept="image/*" hidden>
+<input type="file" id="dir" webkitdirectory multiple hidden>
 <input type="file" id="file" accept="audio/*,.mp3,.m4a,.flac,.wav,.ogg" multiple hidden>
 <script>
 const $=s=>document.querySelector(s),au=$('#au');
@@ -98,8 +99,9 @@ function toast(m,ms=2500){const t=$('#toast');t.textContent=m;t.hidden=false;cle
 function getDur(f){return new Promise(r=>{const a=new Audio(),u=URL.createObjectURL(f);
   const done=v=>{URL.revokeObjectURL(u);r(v)};a.preload='metadata';
   a.onloadedmetadata=()=>done(isFinite(a.duration)?a.duration:0);a.onerror=()=>done(0);a.src=u})}
-$('#file').onchange=async e=>{
-  const fs=[...e.target.files];e.target.value='';
+const imp=async e=>{
+  const fs=[...e.target.files].filter(f=>/^audio\//.test(f.type)||/\.(mp3|m4a|flac|wav|ogg|aac|opus)$/i.test(f.name));e.target.value='';
+  if(!fs.length){toast('No audio files found');return}
   try{await navigator.storage?.persist?.()}catch{}
   let n=0;
   for(const f of fs){
@@ -114,6 +116,7 @@ $('#file').onchange=async e=>{
   }
   await load();render();toast(`Imported ${fs.length} file(s)`);
 };
+$('#file').onchange=$('#dir').onchange=imp;
 
 // ---------- playback ----------
 async function playIndex(i){
@@ -173,7 +176,7 @@ function render(){
   const main=$('#main'),h=$('#hact'),tt=$('#ttl');
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===(view.startsWith('pl:')?'pls':view)));
   if(view==='lib'){
-    tt.textContent='Library';h.innerHTML='<label class="btn" for="file">Import</label>';
+    tt.textContent='Library';h.innerHTML='<label class="btn" for="dir">Folder</label><label class="btn" for="file">Import</label>';
     main.innerHTML=`<input id="search" placeholder="Search ${tracks.length} songs" value="${esc(q)}"><div id="list"></div>`;
     $('#search').oninput=e=>{q=e.target.value.toLowerCase();renderList()};
     renderList();
@@ -263,11 +266,24 @@ $('#pimg').onchange=async e=>{
 const delKey='mm_deleted_bundled';
 const getDeleted=()=>{try{return JSON.parse(localStorage.getItem(delKey)||'[]')}catch{return[]}};
 const markDeleted=n=>{try{localStorage.setItem(delKey,JSON.stringify([...getDeleted(),n]))}catch{}};
+const AUDIO_RE=/\.(mp3|m4a|flac|wav|ogg|aac|opus)$/i;
+async function bundledNames(){
+  let names=[];
+  try{const r=await fetch('songs/list.txt',{cache:'no-cache'});
+    if(r.ok)names=(await r.text()).split(/\r?\n/).map(x=>x.trim()).filter(x=>x&&!x.startsWith('#'))}catch{}
+  const m=location.hostname.match(/^(.+)\.github\.io$/);
+  if(m){
+    let seg=location.pathname.split('/').filter(Boolean)[0];
+    if(!seg||/\.html?$/.test(seg))seg=location.hostname;
+    try{const r=await fetch(`https://api.github.com/repos/${m[1]}/${seg}/contents/songs`);
+      if(r.ok)names=names.concat((await r.json()).filter(x=>x.type==='file'&&AUDIO_RE.test(x.name)).map(x=>x.name))}catch{}
+  }
+  return [...new Set(names)];
+}
 async function syncBundled(){
   try{
-    const r=await fetch('songs/list.txt',{cache:'no-cache'});if(!r.ok)return;
     const skip=getDeleted();
-    const todo=(await r.text()).split(/\r?\n/).map(x=>x.trim()).filter(x=>x&&!x.startsWith('#')&&!skip.includes(x)&&!tracks.some(t=>t.bundled===x));
+    const todo=(await bundledNames()).filter(x=>!skip.includes(x)&&!tracks.some(t=>t.bundled===x));
     if(!todo.length)return;
     try{await navigator.storage?.persist?.()}catch{}
     let n=0;
