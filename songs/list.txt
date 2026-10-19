@@ -1,2 +1,4 @@
 # One song filename per line, exactly as the file is named in this folder.
 # Lines starting with # are ignored.
+34. Flower Man (DELTARUNE Chapter 5 Soundtrack) - Toby Fox _ @Cametek.CamelliaOfficial.mp3
+087. Hopes And Dreams (UNDERTALE Soundtrack) - Toby Fox.mp3
