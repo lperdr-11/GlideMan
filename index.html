@@ -227,6 +227,7 @@ async function act(a,d){
     case 'mv':{const i=curPl.ids.indexOf(d.id),j=i+ +d.d;if(j>=0&&j<curPl.ids.length){[curPl.ids[i],curPl.ids[j]]=[curPl.ids[j],curPl.ids[i]];await savePl(curPl)}closeSheet();render();break}
     case 'deltrack':{
       if(!confirm('Delete this song from the app?'))break;
+      {const bt=byId(d.id);if(bt&&bt.bundled)markDeleted(bt.bundled)}
       await run(['tracks','blobs'],'readwrite',t=>{t.objectStore('tracks').delete(d.id);return t.objectStore('blobs').delete(d.id)});
       for(const p of pls)if(p.ids.includes(d.id)){p.ids=p.ids.filter(i=>i!==d.id);await savePl(p)}
       await load();closeSheet();render();break}
@@ -258,7 +259,36 @@ $('#pimg').onchange=async e=>{
   }catch{toast('Could not read that image')}
 };
 
-load().then(render);
+// ---------- bundled songs (songs/list.txt) ----------
+const delKey='mm_deleted_bundled';
+const getDeleted=()=>{try{return JSON.parse(localStorage.getItem(delKey)||'[]')}catch{return[]}};
+const markDeleted=n=>{try{localStorage.setItem(delKey,JSON.stringify([...getDeleted(),n]))}catch{}};
+async function syncBundled(){
+  try{
+    const r=await fetch('songs/list.txt',{cache:'no-cache'});if(!r.ok)return;
+    const skip=getDeleted();
+    const todo=(await r.text()).split(/\r?\n/).map(x=>x.trim()).filter(x=>x&&!x.startsWith('#')&&!skip.includes(x)&&!tracks.some(t=>t.bundled===x));
+    if(!todo.length)return;
+    try{await navigator.storage?.persist?.()}catch{}
+    let n=0;
+    for(const name of todo){
+      toast(`Adding bundled songs ${++n}/${todo.length}…`,0);
+      try{
+        const resp=await fetch('songs/'+encodeURIComponent(name));if(!resp.ok)continue;
+        const blob=await resp.blob();
+        let title=name.replace(/\.[^.]+$/,''),artist='Unknown artist';
+        const m=title.match(/^(.+?)\s+-\s+(.+)$/);if(m){artist=m[1];title=m[2]}
+        const dur=await getDur(blob),id=uid();
+        const meta={id,name,size:blob.size,title,artist,dur,bundled:name};
+        await run(['tracks','blobs'],'readwrite',t=>{t.objectStore('tracks').put(meta);return t.objectStore('blobs').put(blob,id)});
+        tracks.push(meta);
+      }catch{}
+    }
+    await load();render();toast(`Added ${n} bundled song(s)`);
+  }catch{/* offline or no list: ignore */}
+}
+
+load().then(()=>{render();syncBundled()});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
 </script>
 </body></html>

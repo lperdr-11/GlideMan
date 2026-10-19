@@ -1,0 +1,2 @@
+# One song filename per line, exactly as the file is named in this folder.
+# Lines starting with # are ignored.
