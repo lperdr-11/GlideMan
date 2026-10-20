@@ -49,6 +49,7 @@ nav button.on{color:var(--acc);font-weight:600}
 .emos button{font-size:22px;text-align:center;padding:8px}
 .emos button.sel{outline:2px solid var(--acc)}
 .frow{display:flex;gap:8px}.frow button{flex:1;text-align:center}
+.sub{color:var(--mut);padding:0 12px 8px;font-size:14px}
 </style></head>
 <body>
 <header><h1 id="ttl">Library</h1><div id="hact" style="display:flex;gap:8px"></div></header>
@@ -81,18 +82,34 @@ let tracks=[],pls=[],view='lib',q='',curList=[],queue=[],qi=-1,shuffle=false,rep
 const byId=id=>tracks.find(t=>t.id===id);
 
 // ---------- storage (IndexedDB) ----------
-const DB=new Promise((res,rej)=>{const r=indexedDB.open('mymusic',1);
+let dbp;
+const openDB=()=>new Promise((res,rej)=>{const r=indexedDB.open('mymusic',1);
   r.onupgradeneeded=()=>{const d=r.result;d.createObjectStore('tracks',{keyPath:'id'});d.createObjectStore('blobs');d.createObjectStore('playlists',{keyPath:'id'})};
-  r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
-const run=(stores,mode,fn)=>DB.then(db=>new Promise((res,rej)=>{const t=db.transaction(stores,mode);const r=fn(t);
+  r.onsuccess=()=>{const d=r.result;d.onclose=()=>{dbp=openDB()};d.onversionchange=()=>d.close();res(d)};
+  r.onerror=()=>rej(r.error)});
+dbp=openDB();
+const run1=(stores,mode,fn)=>dbp.then(db=>new Promise((res,rej)=>{const t=db.transaction(stores,mode);const r=fn(t);
   t.oncomplete=()=>res(r&&r.result);t.onerror=t.onabort=()=>rej(t.error)}));
-const savePl=p=>run('playlists','readwrite',t=>t.objectStore('playlists').put(p));
+// Android can close the database in the background: reopen and retry once
+const run=async(stores,mode,fn)=>{try{return await run1(stores,mode,fn)}catch(e){dbp=openDB();return await run1(stores,mode,fn)}};
+const PB='mm_pl_backup';
+function backupPl(force){
+  if(!pls.length&&!force)return;
+  try{localStorage.setItem(PB,JSON.stringify(pls))}catch{try{localStorage.setItem(PB,JSON.stringify(pls.map(p=>({...p,img:null}))))}catch{}}
+}
+const savePl=async p=>{await run('playlists','readwrite',t=>t.objectStore('playlists').put(p));backupPl()};
 async function load(){
   tracks=(await run('tracks','readonly',t=>t.objectStore('tracks').getAll()))||[];
   tracks.sort((a,b)=>a.title.localeCompare(b.title));
   pls=(await run('playlists','readonly',t=>t.objectStore('playlists').getAll()))||[];
   pls.sort((a,b)=>a.name.localeCompare(b.name));
+  backupPl();try{if(tracks.length)localStorage.setItem('mm_had','1')}catch{}
 }
+// same file => same id, so playlists reconnect after a re-import
+const hid=x=>{let h=7;for(const c of x)h=(h*31+c.charCodeAt(0))>>>0;return 't'+h.toString(36)};
+const newId=x=>{const id=hid(x);return tracks.some(t=>t.id===id)?uid():id};
+const fmtLen=sec=>{const m=Math.round(sec/60);return m<1?'<1 min':m>=60?Math.floor(m/60)+' h '+(m%60)+' min':m+' min'};
+const plInfo=ids=>{const ts=ids.map(byId).filter(Boolean);return ts.length+' song'+(ts.length===1?'':'s')+' · '+fmtLen(ts.reduce((a,t)=>a+(t.dur||0),0))};
 function toast(m,ms=2500){const t=$('#toast');t.textContent=m;t.hidden=false;clearTimeout(toast.t);if(ms)toast.t=setTimeout(()=>t.hidden=true,ms)}
 
 // ---------- import ----------
@@ -109,7 +126,7 @@ const imp=async e=>{
     if(tracks.some(t=>t.name===f.name&&t.size===f.size))continue;
     let title=f.name.replace(/\.[^.]+$/,''),artist='Unknown artist';
     const m=title.match(/^(.+?)\s+-\s+(.+)$/);if(m){artist=m[1];title=m[2]}
-    const dur=await getDur(f),id=uid();
+    const dur=await getDur(f),id=newId(f.name+'|'+f.size);
     try{await run(['tracks','blobs'],'readwrite',t=>{t.objectStore('tracks').put({id,name:f.name,size:f.size,title,artist,dur});return t.objectStore('blobs').put(f,id)});
       tracks.push({id,name:f.name,size:f.size,title,artist,dur})}
     catch{toast('Storage full or blocked');return}
@@ -119,34 +136,62 @@ const imp=async e=>{
 $('#file').onchange=$('#dir').onchange=imp;
 
 // ---------- playback ----------
-async function playIndex(i){
-  qi=i;const id=queue[i];
-  const b=await run('blobs','readonly',t=>t.objectStore('blobs').get(id));
-  if(!b){toast('File missing');return}
-  if(curUrl)URL.revokeObjectURL(curUrl);
-  curUrl=URL.createObjectURL(b);au.src=curUrl;au.loop=rep===2;
-  try{await au.play()}catch{}
-  setMeta();updPlayer();
-}
-let bag=[],hist=[];
+let bag=[],hist=[],plan=null,preTok=0,errRun=0,loadedId=null;
 const shuf=a=>{for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+const getUrl=async id=>{const b=await run('blobs','readonly',t=>t.objectStore('blobs').get(id));return b?URL.createObjectURL(b):null};
 function resetBag(cur){bag=shuf(queue.map((_,k)=>k).filter(k=>k!==cur));hist=[cur]}
+function refillBag(){bag=shuf(queue.map((_,k)=>k));if(bag.length>1&&bag[bag.length-1]===qi)[bag[0],bag[bag.length-1]]=[bag[bag.length-1],bag[0]]}
+function peekNext(auto){
+  if(!queue.length)return -1;
+  if(shuffle&&queue.length>1){
+    if(!bag.length){if(auto&&rep!==1)return -1;refillBag()}
+    return bag[bag.length-1];
+  }
+  let i=qi+1;if(i>=queue.length){if(rep===1||!auto)i=0;else return -1}
+  return i;
+}
+// Load the next song in advance so the switch needs no waiting (works with the screen off)
+async function preloadNext(){
+  const tok=++preTok;
+  if(plan){URL.revokeObjectURL(plan.url);plan=null}
+  const i=peekNext(true);if(i<0||i===qi)return;
+  const id=queue[i];let url=null;
+  try{url=await getUrl(id)}catch{}
+  if(!url)return;
+  if(tok!==preTok){URL.revokeObjectURL(url);return}
+  plan={i,id,url};
+}
+async function playIndex(i){
+  const id=queue[i];qi=i;++preTok;
+  let url=null;
+  if(plan){if(plan.i===i&&plan.id===id)url=plan.url;else URL.revokeObjectURL(plan.url);plan=null}
+  if(!url){try{url=await getUrl(id)}catch{}}
+  if(qi!==i){if(url&&url!==curUrl)URL.revokeObjectURL(url);return}
+  if(!url){toast('File missing, skipping');if(++errRun<queue.length)setTimeout(()=>next(true),300);return}
+  const old=curUrl;curUrl=url;loadedId=id;au.src=url;au.loop=rep===2;
+  if(old&&old!==url)URL.revokeObjectURL(old);
+  au.play().catch(()=>{});
+  setMeta();updPlayer();saveState();preloadNext();
+}
 function playList(ids,i,all){
   if(!ids.length)return;queue=ids.slice();
   if(all){shuffle=true;i=Math.floor(Math.random()*queue.length)}
   resetBag(i);playIndex(i);
 }
+function commit(i){
+  if(!(shuffle&&queue.length>1))return;
+  const k=bag.lastIndexOf(i);if(k>-1)bag.splice(k,1);
+  hist.push(i);if(hist.length>300)hist.shift();
+}
 function next(auto){
-  if(!queue.length)return;let i;
-  if(shuffle&&queue.length>1){
-    if(!bag.length){
-      if(auto&&rep!==1){au.pause();return}
-      bag=shuf(queue.map((_,k)=>k));
-      if(bag[bag.length-1]===qi)[bag[0],bag[bag.length-1]]=[bag[bag.length-1],bag[0]];
-    }
-    i=bag.pop();hist.push(i);if(hist.length>300)hist.shift();
-  }else{i=qi+1;if(i>=queue.length){if(rep===1||!auto)i=0;else{au.pause();return}}}
-  playIndex(i);
+  const i=peekNext(!!auto);
+  if(i<0){au.pause();return}
+  commit(i);playIndex(i);
+}
+// If a background switch ever failed, play must start the song that is shown, not replay the old one
+function togglePlay(){
+  if(qi>=0&&queue.length&&loadedId!==queue[qi]){playIndex(qi);return}
+  au.paused?au.play():au.pause();
 }
 function prev(){
   if(au.currentTime>3)au.currentTime=0;
@@ -154,8 +199,35 @@ function prev(){
   else if(qi<=0||shuffle)au.currentTime=0;
   else playIndex(qi-1);
 }
+// ---------- remember what was playing, in case Android closes the app ----------
+const ST='mm_state';let ready=false,lastSave=0;
+function saveState(){
+  if(!ready)return;
+  try{localStorage.setItem(ST,JSON.stringify({queue,qi,pos:au.currentTime||0,shuffle,rep,view}))}catch{}
+}
+async function restoreState(){
+  try{
+    const s=JSON.parse(localStorage.getItem(ST)||'null');if(!s||queue.length)return;
+    shuffle=!!s.shuffle;rep=s.rep|0;
+    if(s.view==='lib'||s.view==='pls'||(typeof s.view==='string'&&s.view.startsWith('pl:')&&pls.some(p=>'pl:'+p.id===s.view)))view=s.view;
+    const cur=(s.queue||[])[s.qi];
+    queue=(s.queue||[]).filter(byId);qi=queue.indexOf(cur);
+    if(qi<0){queue=[];qi=-1;return}
+    const url=await getUrl(queue[qi]);if(!url)return;
+    curUrl=url;loadedId=queue[qi];au.src=url;au.loop=rep===2;
+    au.addEventListener('loadedmetadata',()=>{if(s.pos>0&&s.pos<au.duration)au.currentTime=s.pos},{once:true});
+    if(shuffle)resetBag(qi);
+    setMeta();updPlayer();preloadNext();
+  }catch{}
+}
 au.onended=()=>next(true);
-au.onplay=au.onpause=()=>{$('#pp').textContent=au.paused?'▶':'⏸'};
+au.onplaying=()=>{errRun=0};
+au.onerror=()=>{if(queue.length&&++errRun<=queue.length){toast('Could not play that song, skipping');setTimeout(()=>next(true),300)}};
+au.addEventListener('timeupdate',()=>{const n=Date.now();if(n-lastSave>4000){lastSave=n;saveState()}});
+au.addEventListener('pause',saveState);
+['pagehide','freeze'].forEach(e=>addEventListener(e,saveState));
+document.addEventListener('visibilitychange',saveState);
+au.onplay=au.onpause=()=>{$('#pp').textContent=au.paused?'▶':'⏸';if('mediaSession' in navigator)navigator.mediaSession.playbackState=au.paused?'paused':'playing'};
 au.onloadedmetadata=()=>{$('#seek').max=Math.floor(au.duration)||0};
 au.ontimeupdate=()=>{
   if(!seeking)$('#seek').value=Math.floor(au.currentTime);
@@ -179,7 +251,7 @@ function setMeta(){
 }
 if('mediaSession' in navigator){
   const h=(a,f)=>{try{navigator.mediaSession.setActionHandler(a,f)}catch{}};
-  h('play',()=>au.play());h('pause',()=>au.pause());h('previoustrack',prev);h('nexttrack',()=>next());
+  h('play',togglePlay);h('pause',()=>au.pause());h('previoustrack',prev);h('nexttrack',()=>next());
   h('seekto',d=>{au.currentTime=d.seekTime});
 }
 
@@ -200,13 +272,13 @@ function render(){
     renderList();
   }else if(view==='pls'){
     tt.textContent='Playlists';h.innerHTML='<button class="btn" data-a="newpl">+ New</button>';
-    main.innerHTML=pls.length?pls.map(p=>`<div class="row" data-a="openpl" data-id="${p.id}">${iconHtml(p)}<div class="meta"><b>${esc(p.name)}</b><small>${p.ids.length} songs</small></div><button class="dots" data-a="editpl" data-id="${p.id}">✏️</button></div>`).join(''):'<p class="empty">No playlists yet. Tap “+ New”.</p>';
+    main.innerHTML=pls.length?pls.map(p=>`<div class="row" data-a="openpl" data-id="${p.id}">${iconHtml(p)}<div class="meta"><b>${esc(p.name)}</b><small>${plInfo(p.ids)}</small></div><button class="dots" data-a="editpl" data-id="${p.id}">✏️</button></div>`).join(''):'<p class="empty">No playlists yet. Tap “+ New”.</p>';
   }else{
     const p=pls.find(x=>x.id===view.slice(3));if(!p){view='pls';return render()}
     const ids=p.ids.filter(byId);curList=ids;
     tt.textContent=(p.img?'':(p.icon||'🎵')+' ')+p.name;
     h.innerHTML='<button data-a="tab" data-v="pls">←</button><button data-a="editpl" data-id="'+p.id+'">✏️</button><button data-a="playshuf">🔀</button><button class="btn" data-a="playall">▶</button>';
-    main.innerHTML=ids.length?ids.map(i=>rowHtml(byId(i))).join(''):'<p class="empty">Empty. Add songs from the Library (⋮ menu).</p>';
+    main.innerHTML=`<div class="sub">${plInfo(ids)}</div>`+(ids.length?ids.map(i=>rowHtml(byId(i))).join(''):'<p class="empty">Empty. Add songs from the Library (⋮ menu).</p>');
   }
 }
 const sheet=html=>{$('#sbox').innerHTML=html;$('#sheet').hidden=false};
@@ -220,11 +292,11 @@ async function act(a,d){
     case 'play':playList(curList,curList.indexOf(d.id));break;
     case 'playall':playList(curList,0);break;
     case 'playshuf':playList(curList,0,true);break;
-    case 'toggle':au.paused?au.play():au.pause();break;
+    case 'toggle':togglePlay();break;
     case 'next':next();break;
     case 'prev':prev();break;
-    case 'shuf':shuffle=!shuffle;if(shuffle&&queue.length)resetBag(qi);updPlayer();break;
-    case 'rep':rep=(rep+1)%3;au.loop=rep===2;updPlayer();break;
+    case 'shuf':shuffle=!shuffle;if(shuffle&&queue.length)resetBag(qi);updPlayer();preloadNext();saveState();break;
+    case 'rep':rep=(rep+1)%3;au.loop=rep===2;updPlayer();preloadNext();saveState();break;
     case 'newpl':form={id:null,name:'',icon:'🎵',img:null,addId:null};formSheet();break;
     case 'editpl':{const p=pls.find(x=>x.id===d.id);form={id:p.id,name:p.name,icon:p.icon||'🎵',img:p.img||null,addId:null};formSheet();break}
     case 'emo':keepName();form.icon=d.e;form.img=null;formSheet();break;
@@ -237,7 +309,7 @@ async function act(a,d){
       else p={id:uid(),name:n,icon:form.icon,img:form.img,ids:form.addId?[form.addId]:[]};
       await savePl(p);await load();closeSheet();render();break}
     case 'openpl':view='pl:'+d.id;render();break;
-    case 'delpl':if(confirm('Delete this playlist?')){await run('playlists','readwrite',t=>t.objectStore('playlists').delete(d.id));await load();closeSheet();if(view==='pl:'+d.id)view='pls';render()}break;
+    case 'delpl':if(confirm('Delete this playlist?')){await run('playlists','readwrite',t=>t.objectStore('playlists').delete(d.id));await load();backupPl(true);closeSheet();if(view==='pl:'+d.id)view='pls';render()}break;
     case 'menu':{const t=byId(d.id);
       sheet(`<h3>${esc(t.title)}</h3><button data-a="addto" data-id="${t.id}">Add to playlist</button>`+
         (curPl?`<button data-a="mv" data-id="${t.id}" data-d="-1">Move up</button><button data-a="mv" data-id="${t.id}" data-d="1">Move down</button><button data-a="rmpl" data-id="${t.id}">Remove from playlist</button>`:'')+
@@ -252,7 +324,7 @@ async function act(a,d){
       {const bt=byId(d.id);if(bt&&bt.bundled)markDeleted(bt.bundled)}
       await run(['tracks','blobs'],'readwrite',t=>{t.objectStore('tracks').delete(d.id);return t.objectStore('blobs').delete(d.id)});
       for(const p of pls)if(p.ids.includes(d.id)){p.ids=p.ids.filter(i=>i!==d.id);await savePl(p)}
-      await load();closeSheet();render();break}
+      await load();if(!tracks.length)try{localStorage.setItem('mm_had','0')}catch{}closeSheet();render();break}
   }
 }
 document.addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(b){e.stopPropagation();act(b.dataset.a,b.dataset)}});
@@ -313,7 +385,7 @@ async function syncBundled(){
         const blob=await resp.blob();
         let title=name.replace(/\.[^.]+$/,''),artist='Unknown artist';
         const m=title.match(/^(.+?)\s+-\s+(.+)$/);if(m){artist=m[1];title=m[2]}
-        const dur=await getDur(blob),id=uid();
+        const dur=await getDur(blob),id=newId('b|'+name);
         const meta={id,name,size:blob.size,title,artist,dur,bundled:name};
         await run(['tracks','blobs'],'readwrite',t=>{t.objectStore('tracks').put(meta);return t.objectStore('blobs').put(blob,id)});
         tracks.push(meta);
@@ -323,7 +395,22 @@ async function syncBundled(){
   }catch{/* offline or no list: ignore */}
 }
 
-load().then(()=>{render();syncBundled()});
+async function init(){
+  let bk=null,had=false;
+  try{bk=localStorage.getItem(PB);had=localStorage.getItem('mm_had')==='1'}catch{}
+  try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch{}
+  try{
+    await load();
+    if(!pls.length&&bk){
+      const b=JSON.parse(bk);
+      if(Array.isArray(b)&&b.length){for(const p of b)await savePl(p);await load();toast('Restored your playlists from backup',5000)}
+    }
+    if(!tracks.length&&had)toast('Your songs were cleared by Chrome/Android. Re-import them and your playlists will reconnect.',9000);
+    await restoreState();
+  }catch(e){$('#main').innerHTML='<p class="empty">Could not open storage. Close the app completely and open it again.</p>';return}
+  ready=true;render();syncBundled();
+}
+init();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
 </script>
 </body></html>
